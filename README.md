@@ -4,4 +4,4 @@ This repository contains the files as support for my blogs on the AMIS technolog
 Secretsmanager
 --------------
 Demo how to use the secretsmanager, with automated renewal of the database password.  
-Direct link to the blog: <...>
+Direct link to the blog: https://technology.amis.nl/aws/first-steps-in-rotating-secrets-in-aws-secrets-manager/
