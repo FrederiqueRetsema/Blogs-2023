@@ -1,0 +1,688 @@
+# Database-MySQLSingleUser
+# ========================
+
+Transform: AWS::SecretsManager-2020-07-23
+
+# ===================================================================================================================================================
+# Parameters
+# ===================================================================================================================================================
+
+Parameters:
+
+  EC2InstanceType:
+    Description: EC2 type 
+    Type: String
+    Default: t4g.nano
+  AmazonLinux2023AMI: 
+    Description: Amazon Linux AMI
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
+
+  DatabaseMainAdminUser:
+    Type: String
+    Default: "databaseadmin"
+  WebsiteUser:
+    Type: String
+    Default: "webuser"
+  DatabaseClusterIdentifier:
+    Type: String
+    Default: "MyDatabaseCluster"
+  DatabaseName:
+    Type: String
+    Default: "demodb"
+  DeletionProtection:                 # False makes it more easy to delete the stack without too much fuss
+    Type: String
+    Default: False
+
+# ===================================================================================================================================================
+# Resources
+# ===================================================================================================================================================
+
+Resources:
+
+  # ===========================================================================================================================================================
+  # Network
+  # ===========================================================================================================================================================
+
+  DatabaseVpc:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: DatabaseVpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref DatabaseVpc
+
+  PublicSubnetAZa:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref DatabaseVpc
+      Tags:
+        - Key: Name
+          Value: PublicSubnetAZa
+  PublicSubnetAZaRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAZa
+
+  PublicSubnetAZb:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref DatabaseVpc
+      Tags:
+        - Key: Name
+          Value: PublicSubnetAZb
+  PublicSubnetAZbRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAZb
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+      VpcId: !Ref DatabaseVpc
+  PublicRoutePublicInternet:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  FlowLogExecutionRolePublicWrite:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "vpc-flow-logs.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  FlowLogExecutionRolePublicWritePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "FlowLogExecutionRolePublicWritePolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/vpc/flowlogs:*"
+      Roles:
+        - !Ref "FlowLogExecutionRolePublicWrite"
+
+  FlowLogPublicSubnetAZa:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogExecutionRolePublicWrite.Arn 
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: /aws/vpc/flowlogs
+      MaxAggregationInterval: 60
+      ResourceId: !Ref PublicSubnetAZa
+      ResourceType: Subnet
+      TrafficType: ALL
+  FlowLogPublicSubnetAZb:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogExecutionRolePublicWrite.Arn
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: /aws/vpc/flowlogs
+      MaxAggregationInterval: 60
+      ResourceId: !Ref PublicSubnetAZb
+      ResourceType: Subnet
+      TrafficType: ALL
+
+  SecurityGroupAutoRotationLambdaSingleUser:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupAutoRotationLambdaSingleUser
+      GroupDescription: Securitygroup that allows traffic from single user Lambda
+      VpcId: !Ref DatabaseVpc
+  SecurityGroupEgressSecurityGroupAutoRotationLambdaSingleUserToDB:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupAutoRotationLambdaSingleUser
+      DestinationSecurityGroupId: !Ref SecurityGroupDatabase
+      Description: "To Database"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  SecurityGroupEgressSecurityGroupAutoRotationLambdaSingleUserToVPCEndpoint:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupAutoRotationLambdaSingleUser
+      DestinationSecurityGroupId: !Ref SecurityGroupEndpoint
+      Description: "To VPCEndpoint"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+
+  SecurityGroupAutoRotationLambdaMultiUser:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupAutoRotationLambdaMultiUser
+      GroupDescription: Securitygroup that allows traffic from Lambda
+      VpcId: !Ref DatabaseVpc
+  SecurityGroupEgressSecurityGroupAutoRotationLambdaMultiUserToDB:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupAutoRotationLambdaMultiUser
+      DestinationSecurityGroupId: !Ref SecurityGroupDatabase
+      Description: "To Database"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  SecurityGroupEgressSecurityGroupAutoRotationLambdaMultiUserToVPCEndpoint:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupAutoRotationLambdaMultiUser
+      DestinationSecurityGroupId: !Ref SecurityGroupEndpoint
+      Description: "To VPCEndpoint"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+
+  SecurityGroupDatabase:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupDatabase
+      GroupDescription: Securitygroup that allows traffic to DB
+      VpcId: !Ref DatabaseVpc
+  SecurityGroupIngressSecurityGroupDatabaseFromEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupDatabase
+      SourceSecurityGroupId: !Ref SecurityGroupEC2
+      Description: "From EC2"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  SecurityGroupIngressSecurityGroupDatabaseFromLambdaSingleUser:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupDatabase
+      SourceSecurityGroupId: !Ref SecurityGroupAutoRotationLambdaSingleUser
+      Description: "From Lambda"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  SecurityGroupIngressSecurityGroupDatabaseFromLambdaMultiUser:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupDatabase
+      SourceSecurityGroupId: !Ref SecurityGroupAutoRotationLambdaMultiUser
+      Description: "From Lambda"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+
+  SecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupEC2
+      GroupDescription: Securitygroup that allows SSH traffic to the EC2 and HTTP(S) from the EC2
+      VpcId: !Ref DatabaseVpc
+  EndPointSecurityGroupEgressSecurityGroupEC2HTTP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupEC2
+      Description: "To public internet"
+      CidrIp: 0.0.0.0/0
+      FromPort: 80
+      ToPort: 80
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEC2HTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupEC2
+      CidrIp: 0.0.0.0/0
+      Description: "To public internet and VPCEndpoint"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEC2MySQL:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupEC2
+      DestinationSecurityGroupId: !Ref SecurityGroupDatabase
+      Description: "To Database"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+
+  SecurityGroupEndpoint:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupEndpoint
+      GroupDescription: Securitygroup that allows HTTPS traffic to endpoints
+      VpcId: !Ref DatabaseVpc
+  SecurityGroupIngressSecurityGroupEndpointFromLambdaSingleUser:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupEndpoint
+      SourceSecurityGroupId: !Ref SecurityGroupAutoRotationLambdaSingleUser
+      Description: "From Lambda"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+  SecurityGroupIngressSecurityGroupEndpointFromLambdaMultiUser:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupEndpoint
+      SourceSecurityGroupId: !Ref SecurityGroupAutoRotationLambdaMultiUser
+      Description: "From Lambda"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+  SecurityGroupIngressSecurityGroupEndpointFromEC2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupEndpoint
+      SourceSecurityGroupId: !Ref SecurityGroupEC2
+      Description: "From EC2"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+
+  SecretsManagerVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PrivateDnsEnabled: true
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.secretsmanager"
+      SubnetIds: 
+        - !Ref PublicSubnetAZa
+        - !Ref PublicSubnetAZb
+      VpcEndpointType: Interface
+      SecurityGroupIds:
+        - !Ref SecurityGroupEndpoint
+      VpcId: !Ref DatabaseVpc
+
+  # ========================================================================================================================================================================
+  # DetermineEngineVersion
+  # ========================================================================================================================================================================
+
+  DetermineEngineVersionExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  DetermineEngineVersionExecutionRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "DetermineEngineVersionExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+          - Sid: 'RDS'
+            Effect: "Allow"
+            Action: 
+              - "rds:DescribeOrderableDbInstanceOptions"
+              - "rds:DescribeDBEngineVersions"
+            Resource: "*"
+      Roles: 
+        - !Ref DetermineEngineVersionExecutionRole
+  DetermineEngineVersionFunction:
+    DependsOn: DetermineEngineVersionExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt DetermineEngineVersionExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+
+          def lambda_handler(event, context):
+
+              try:
+                  rds = boto3.client('rds')
+                  result = rds.describe_orderable_db_instance_options(
+                      Engine = "aurora-mysql",
+                      DBInstanceClass = 'db.serverless'
+                  )
+
+                  highest_engine_version = ''
+                  for orderable_db_instance_option in result['OrderableDBInstanceOptions']:
+                      if orderable_db_instance_option['EngineVersion'] > highest_engine_version:
+                          highest_engine_version = orderable_db_instance_option['EngineVersion']
+
+                  print('TRACE Highest db instance option = ' + highest_engine_version)
+
+                  result = rds.describe_db_engine_versions(
+                      Engine = 'aurora-mysql',
+                      EngineVersion = highest_engine_version
+                  )
+                  db_parameter_group_family = result['DBEngineVersions'][0]['DBParameterGroupFamily']
+
+                  print('TRACE DBParameterGroupFamily = ' + db_parameter_group_family)
+                  print("TRACE Before SUCCESS")
+
+                  responseData = {                  
+                     'EngineVersion': highest_engine_version,
+                     'DBParameterGroupFamily': db_parameter_group_family
+                  }
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "version="+highest_engine_version)
+
+              except Exception as e:
+                  print(e)
+                  print("TRACE Before FAILED")
+
+                  responseData = {}
+                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "n/a")
+
+              return
+      Runtime: python3.10
+  ExecuteDetermineEngineVersionFunction:
+    Type: Custom::ExecuteDetermineEngineVersionFunction
+    Properties:
+      ServiceToken: !GetAtt DetermineEngineVersionFunction.Arn
+
+  # =============================================================================================================================================================================
+  # Database and secret
+  # =============================================================================================================================================================================
+
+  DatabaseMainAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      Name: DatabaseMainAdminUser
+      Description: "Main admin user for the database"
+      GenerateSecretString:
+        SecretStringTemplate: !Sub |
+            { 
+               "engine": "mysql",
+               "username": "${DatabaseMainAdminUser}"
+            }
+        GenerateStringKey: "password"
+        PasswordLength: 32
+        ExcludePunctuation: true
+  DatabaseMainAdminSecretRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DatabaseMainAdminSecret
+      TargetId: !Ref DatabaseCluster
+      TargetType: AWS::RDS::DBCluster
+  DatabaseMainAdminSecretRotationSchedule:
+    DependsOn: 
+      - DatabaseMainAdminSecretRDSInstanceAttachment
+      - DatabaseInstance
+    Type: AWS::SecretsManager::RotationSchedule
+    Properties:
+      SecretId: !Ref DatabaseMainAdminSecret
+      RotateImmediatelyOnUpdate: False
+      RotationRules:
+         AutomaticallyAfterDays: 7
+      HostedRotationLambda:
+         RotationType: MySQLSingleUser
+         RotationLambdaName: SecretsManagerRotationSingleUser
+         VpcSecurityGroupIds: !Ref SecurityGroupAutoRotationLambdaSingleUser
+         VpcSubnetIds: !Sub "${PublicSubnetAZa},${PublicSubnetAZb}"
+         ExcludeCharacters: '!"#$%&()*+,./:;<=>?@[\]^`{|}~'''
+  AllowUseOfDatabaseMainAdminSecretAtRotationOfWebsiteUserSecret:
+    Type: AWS::SecretsManager::ResourcePolicy
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      BlockPublicPolicy: False
+      SecretId: !Ref DatabaseMainAdminSecret
+      ResourcePolicy:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Action: "secretsmanager:GetSecretValue"
+          Resource: "*"
+          Principal: "*"
+          Condition:
+            "ArnLike": 
+              "aws:PrincipalArn": !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${AWS::StackName}*SecretsManager*"
+
+  WebsiteUserSecret:
+    DependsOn:
+      - DatabaseMainAdminSecret
+    Type: AWS::SecretsManager::Secret
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      Name: WebsiteUser
+      Description: "Website user for the database"
+      GenerateSecretString:
+        SecretStringTemplate: !Sub |
+            { 
+               "engine": "mysql",
+               "host": "",
+               "username": "${WebsiteUser}",
+               "masterarn": "${DatabaseMainAdminSecret}"
+            }
+        GenerateStringKey: "password"
+        PasswordLength: 32
+        ExcludePunctuation: true
+  WebsiteUserSecretRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref WebsiteUserSecret
+      TargetId: !Ref DatabaseCluster
+      TargetType: AWS::RDS::DBCluster
+  WebsiteUserSecretRotationSchedule:
+    DependsOn: 
+      - WebsiteUserSecretRDSInstanceAttachment
+      - DatabaseInstance
+    Type: AWS::SecretsManager::RotationSchedule
+    Properties:
+      SecretId: !Ref WebsiteUserSecret
+      RotateImmediatelyOnUpdate: False                    # For demo purposes
+      RotationRules:
+         AutomaticallyAfterDays: 7
+      HostedRotationLambda:
+         RotationType: MySQLMultiUser
+         RotationLambdaName: SecretsManagerRotationMultiUser
+         VpcSecurityGroupIds: !Ref SecurityGroupAutoRotationLambdaMultiUser
+         VpcSubnetIds: !Sub "${PublicSubnetAZa},${PublicSubnetAZb}"
+         ExcludeCharacters: '!"#$%&()*+,./:;<=>?@[\]^`{|}~'''
+  
+  DatabaseClusterParameterGroup:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: Parameter Group - add auditing
+      Family: !GetAtt ExecuteDetermineEngineVersionFunction.DBParameterGroupFamily
+      Parameters:
+        server_audit_events: CONNECT,QUERY,QUERY_DCL,QUERY_DDL,QUERY_DML,TABLE
+        server_audit_logging: 1
+        server_audit_logs_upload: 1             # Uploads logs to CloudWatch
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription:  Subnet Group
+      DBSubnetGroupName: subnetgroup
+      SubnetIds:
+        - !Ref PublicSubnetAZa
+        - !Ref PublicSubnetAZb
+
+  DatabaseCluster:
+    Type: AWS::RDS::DBCluster
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      DatabaseName: !Ref DatabaseName
+      DBClusterIdentifier: !Ref DatabaseClusterIdentifier
+      DBClusterParameterGroupName: !Ref DatabaseClusterParameterGroup
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DeletionProtection: !Ref DeletionProtection
+      Engine: aurora-mysql
+      EngineVersion: !GetAtt ExecuteDetermineEngineVersionFunction.EngineVersion
+      MasterUsername: !Ref DatabaseMainAdminUser
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DatabaseMainAdminSecret}:SecretString:password}}"
+      BackupRetentionPeriod: 30
+      StorageEncrypted: true
+      ServerlessV2ScalingConfiguration:
+        MinCapacity: 0.5
+        MaxCapacity: 64
+      VpcSecurityGroupIds:
+        - !Ref SecurityGroupDatabase
+
+  DatabaseInstance:
+    DependsOn: DatabaseCluster
+    Type: AWS::RDS::DBInstance
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+        DBClusterIdentifier: !Ref DatabaseClusterIdentifier 
+        Engine: aurora-mysql
+        DBInstanceClass: db.serverless
+
+  # =======================================================================================================================================================================
+  # Test instance
+  # =======================================================================================================================================================================
+
+  TestInstanceIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  TestInstanceIAMRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "TestInstanceIAMRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowSSMconnection"
+            Effect: "Allow"
+            Action: 
+              - "ec2messages:GetMessages"
+              - "ssm:GetDocument"
+              - "ssm:ListAssociations"
+              - "ssm:ListInstanceAssociations"
+              - "ssm:UpdateInstanceAssociationStatus"
+              - "ssm:UpdateInstanceInformation"
+              - "ssmmessages:CreateControlChannel"
+              - "ssmmessages:OpenControlChannel"
+              - "ssmmessages:CreateDataChannel"
+              - "ssmmessages:OpenDataChannel"
+            Resource: "*"
+          - Sid: "Secretsmanager"
+            Effect: "Allow"
+            Action:
+              - "secretsmanager:GetSecretValue"
+              - "secretsmanager:RotateSecret"
+            Resource: 
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:DatabaseMainAdminUser*"
+              - !Sub "arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:WebsiteUser*"
+      Roles:
+        - !Ref "TestInstanceIAMRole"
+  TestInstanceIAMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref "TestInstanceIAMRole"
+
+  MySQLTestInstance:
+    DependsOn:
+      - DatabaseMainAdminSecret
+      - WebsiteUserSecret
+      - DatabaseInstance
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Properties:
+      ImageId: !Ref AmazonLinux2023AMI 
+      InstanceType: !Ref EC2InstanceType
+      SubnetId: !Ref PublicSubnetAZa
+      Tags:
+        - Key: Name
+          Value: MySQLTestInstanceInstance 
+      SecurityGroupIds:
+        - !Ref SecurityGroupEC2
+      IamInstanceProfile: !Ref TestInstanceIAMInstanceProfile
+      UserData: 
+        "Fn::Base64": 
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_arm64/amazon-ssm-agent.rpm    
+            yum install -y mariadb105 aws-cfn-bootstrap
+
+            MAIN_ADMIN_SECRET=$(aws secretsmanager get-secret-value --secret-id DatabaseMainAdminUser --query SecretString --output text)
+            MAIN_ADMIN_USERNAME=$(echo $MAIN_ADMIN_SECRET | jq ".username" | awk -F'"' '{print $2}')
+            MAIN_ADMIN_PASSWORD=$(echo $MAIN_ADMIN_SECRET | jq ".password" | awk -F'"' '{print $2}')
+            HOST=$(echo $MAIN_ADMIN_SECRET | jq ".host" | awk -F'"' '{print $2}')
+
+            WEBSITE_USER_SECRET=$(aws secretsmanager get-secret-value --secret-id WebsiteUser --query SecretString --output text)
+            WEBSITE_USER_PASSWORD=$(echo $WEBSITE_USER_SECRET | jq ".password" | awk -F'"' '{print $2}')
+
+            mysql -u$MAIN_ADMIN_USERNAME -p$MAIN_ADMIN_PASSWORD -h$HOST <<here
+
+            CREATE TABLE demodb.prices (item_id int, item_description varchar(10), price decimal(7,2));
+            INSERT INTO demodb.prices VALUES (1, 'Laptop', 2299.95);
+            INSERT INTO demodb.prices VALUES (2, 'Disk', 249.95);
+
+            CREATE USER '${WebsiteUser}'@'%' IDENTIFIED WITH mysql_native_password BY '$WEBSITE_USER_PASSWORD';
+            GRANT SELECT ON demodb.prices TO '${WebsiteUser}';
+            FLUSH PRIVILEGES;
+            here
+
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource MySQLTestInstance --region ${AWS::Region}
+
+# ===================================================================================================================================================
+# Outputs
+# ===================================================================================================================================================
+
+Outputs:
+  DatabaseEndpointAddress:
+    Value: !GetAtt DatabaseCluster.Endpoint.Address
