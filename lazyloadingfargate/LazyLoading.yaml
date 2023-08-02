@@ -1,0 +1,1820 @@
+# LazyLoadingTestVM.yaml
+# ---------------
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: LazyLoadingTestVM
+
+Parameters:
+  EC2InstanceType:
+    Description: EC2 type 
+    Type: String
+    Default: m7g.2xlarge
+
+  AmazonLinux2023AMI: 
+    Description: Amazon Linux AMI
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
+
+Resources:
+
+  # ===========================================================================================================================================================
+  # Network
+  # ===========================================================================================================================================================
+
+  LazyLoadingVpc:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: LazyLoadingVpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref LazyLoadingVpc
+
+  PublicSubnetAZa:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: 10.0.0.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref LazyLoadingVpc
+      Tags:
+        - Key: Name
+          Value: PublicSubnetAZa
+  PublicSubnetAZaRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAZa
+
+  PublicSubnetAZb:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref LazyLoadingVpc
+      Tags:
+        - Key: Name
+          Value: PublicSubnetAZb
+  PublicSubnetAZbRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAZb
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+      VpcId: !Ref LazyLoadingVpc
+  PublicRoutePublicInternet:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SecurityGroupLazyLoadingEC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupLazyLoadingEC2
+      GroupDescription: Securitygroup that allows MySQL from the containers
+      VpcId: !Ref LazyLoadingVpc
+  EndPointSecurityGroupEgressSecurityGroupIngressEC2MySQL:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingEC2
+      Description: "From local internet"
+      CidrIp: 10.0.0.0/16
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEgressEC2HTTP:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingEC2
+      Description: "To public internet"
+      CidrIp: 0.0.0.0/0
+      FromPort: 80
+      ToPort: 80
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEgressEC2HTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingEC2
+      CidrIp: 0.0.0.0/0
+      Description: "To public internet"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+
+  SecurityGroupLazyLoadingContainer:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: SecurityGroupLazyLoadingContainer
+      GroupDescription: Securitygroup that allows HTTP(S) from the EC2
+      VpcId: !Ref LazyLoadingVpc
+  EndPointSecurityGroupEgressSecurityGroupIngressContainerHTTP:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingContainer
+      Description: "From public internet"
+      CidrIp: 0.0.0.0/0
+      FromPort: 80
+      ToPort: 80
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEgressContainerMySQL:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingContainer
+      CidrIp: 10.0.0.0/16
+      Description: "To local mysql"
+      FromPort: 3306
+      ToPort: 3306
+      IpProtocol: TCP
+  EndPointSecurityGroupEgressSecurityGroupEgressContainerHTTPS:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref SecurityGroupLazyLoadingContainer
+      CidrIp: 0.0.0.0/0
+      Description: "To public internet (AWS services)"
+      FromPort: 443
+      ToPort: 443
+      IpProtocol: TCP
+
+  # ============================================================================================================================================================
+  # Log groups
+  # ============================================================================================================================================================
+
+  AlpineWithoutSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/alpine-without-soci
+      RetentionInDays: 1
+  AlpineWithSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/alpine-with-soci
+      RetentionInDays: 1
+
+  DebianWithoutSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/debian-without-soci
+      RetentionInDays: 1
+  DebianWithSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/debian-with-soci
+      RetentionInDays: 1
+
+  UbuntuWithoutSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/ubuntu-without-soci
+      RetentionInDays: 1
+  UbuntuWithSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/ubuntu-with-soci
+      RetentionInDays: 1
+
+  AlmaLinuxWithoutSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/almalinux-without-soci
+      RetentionInDays: 1
+  AlmaLinuxWithSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/almalinux-with-soci
+      RetentionInDays: 1
+
+  CloudwatchLazyLoadingTestVMLogGroupCfnInitCmdLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/LazyLoadingTestVM/cfn-init-cmd.log
+      RetentionInDays: 1
+
+  CloudwatchLazyLoadingTestVMLogGroupCloudInitOutputLog:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ec2/LazyLoadingTestVM/cloud-init-output.log
+      RetentionInDays: 1
+
+  AlpineWithWPWithoutSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/alpine-with-wp-without-soci
+      RetentionInDays: 1
+  AlpineWithWPAndSociLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/ecs/alpine-with-wp-and-soci
+      RetentionInDays: 1
+
+  # ==============================================================================================================================================================
+  # DeleteECRRepository
+  # ==============================================================================================================================================================
+
+  DeleteECRRepositoryExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  DeleteECRRepositoryExecutionRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "CloudwatchAndECR"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+          - Effect: "Allow"
+            Action: 
+              - "ecr:DeleteRepository"
+            Resource: "*"
+      Roles:
+        - !Ref "DeleteECRRepositoryExecutionRole"       
+  DeleteECRRepositoryFunction:
+    DependsOn: 
+    - DeleteECRRepositoryExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt DeleteECRRepositoryExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+
+          import json
+          import cfnresponse
+          import boto3
+
+          def lambda_handler(event, context):
+            try:
+                ecr_repository = event['ResourceProperties']['ECRRepository']
+                print(event)
+
+                if event['RequestType'] == 'Delete':
+                  ecr = boto3.client('ecr')
+
+                  ecr.delete_repository(
+                    repositoryName = ecr_repository,
+                    force = True
+                  )
+
+                print("TRACE Before SUCCESS")
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "n/a")
+            except Exception as e:
+                print(e)
+                print("TRACE Before FAILED")
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "n/a")
+
+            return
+      Runtime: python3.10
+
+  # ==============================================================================================================================================================
+  # ECR Repos
+  # ==============================================================================================================================================================
+
+  AlpineWithoutSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: alpine-without-soci
+  ExecuteDeleteECRRepositoryFunctionAlpineWithoutSociECRRepo:
+    Type: Custom::ExecAlpineWithoutSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlpineWithoutSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  AlpineWithSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: alpine-with-soci
+  ExecuteDeleteECRRepositoryFunctionAlpineWithSociECRRepo:
+    Type: Custom::ExecAlpineWithSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlpineWithSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  DebianWithoutSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: debian-without-soci
+  ExecuteDeleteECRRepositoryFunctionDebianWithoutSociECRRepo:
+    Type: Custom::ExecDebianWithoutSociECRRepo
+    Properties:
+      ECRRepository   : !Ref DebianWithoutSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  DebianWithSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: debian-with-soci
+  ExecuteDeleteECRRepositoryFunctionDebianWithSociECRRepo:
+    Type: Custom::ExecDebianWithSociECRRepo
+    Properties:
+      ECRRepository   : !Ref DebianWithSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  UbuntuWithoutSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ubuntu-without-soci
+  ExecuteDeleteECRRepositoryFunctionUbuntuWithoutSociECRRepo:
+    Type: Custom::ExecUbuntuWithoutSociECRRepo
+    Properties:
+      ECRRepository   : !Ref UbuntuWithoutSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  UbuntuWithSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: ubuntu-with-soci
+  ExecuteDeleteECRRepositoryFunctionUbuntuWithSociECRRepo:
+    Type: Custom::ExecUbuntuWithSociECRRepo
+    Properties:
+      ECRRepository   : !Ref UbuntuWithSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  AlmaLinuxWithoutSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: almalinux-without-soci
+  ExecuteDeleteECRRepositoryFunctionAlmaLinuxWithoutSociECRRepo:
+    Type: Custom::ExecAlmaLinuxWithoutSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlmaLinuxWithoutSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  AlmaLinuxWithSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: almalinux-with-soci
+  ExecuteDeleteECRRepositoryFunctionAlmaLinuxWithSociECRRepo:
+    Type: Custom::ExecAlmaLinuxWithSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlmaLinuxWithSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  AlpineWithWPWithoutSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: alpine-with-wp-without-soci
+  ExecDeleteECRRepositoryFunctionAlpineWithWPWithoutSociECRRepo:
+    Type: Custom::ExecAlmaLinuxWithWPWithoutSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlpineWithWPWithoutSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  AlpineWithWPAndSociECRRepo:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: alpine-with-wp-and-soci
+  ExecuteDeleteECRRepositoryFunctionAlpineWithWPAndSociECRRepo:
+    Type: Custom::ExecAlmaLinuxWithSociECRRepo
+    Properties:
+      ECRRepository   : !Ref AlpineWithWPAndSociECRRepo
+      ServiceToken    : !GetAtt DeleteECRRepositoryFunction.Arn
+
+  DeleteClusterExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+  DeleteClusterExecutionRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "DeleteClusterExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action: 
+              - "ecs:DeleteCluster"
+              - "ecs:DeleteService"
+              - "ecs:ListTasks"
+              - "ecs:StopTask"
+            Resource: "*"
+      Roles:
+        -
+          Ref: "DeleteClusterExecutionRole"
+  DeleteClusterFunction:
+    DependsOn: 
+    - DeleteClusterExecutionRolePolicies
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt DeleteClusterExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+
+          import json
+          import cfnresponse
+          import boto3
+
+          def lambda_handler(event, context):
+            try:
+                cluster = event['ResourceProperties']['Cluster']
+                print(event)
+
+                if event['RequestType'] == 'Delete':
+                    ecs = boto3.client('ecs')
+
+                    print("TRACE Stop container tasks:")
+
+                    response = ecs.list_tasks(
+                      cluster = cluster)
+                    print(response)
+
+                    if ('taskArns' in response):
+                      for task_arn in response["taskArns"]:
+                        print("TRACE Stopping: " + task_arn)
+
+                        response = ecs.stop_task (
+                          cluster = cluster,
+                          task = task_arn
+                        )
+                        print(response)
+                    else:
+                      print("TRACE No tasks to stop")
+
+                    print("TRACE Before delete_cluster")
+                    response = ecs.delete_cluster(
+                      cluster = cluster
+                    )
+
+                print("TRACE Before SUCCESS")
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "n/a")
+            except Exception as e:
+                print(e)
+                print("TRACE Before FAILED")
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "n/a")
+
+            return
+      Runtime: python3.10
+
+  # ==============================================================================================================================================================
+  # ECS Clusters
+  # ==============================================================================================================================================================
+
+  AlpineWithoutSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: alpine-without-soci-cluster
+  ExecuteDeleteClusterFunctionAlpineWithoutSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlpineWithoutSoci
+    Properties:
+      Cluster      : !Ref AlpineWithoutSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  AlpineWithSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: alpine-with-soci-cluster
+  ExecuteDeleteClusterFunctionAlpineWithSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlpineWithSoci
+    Properties:
+      Cluster      : !Ref AlpineWithSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  DebianWithoutSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: debian-without-soci-cluster
+  ExecuteDeleteClusterFunctionDebianWithoutSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionDebianWithoutSoci
+    Properties:
+      Cluster      : !Ref DebianWithoutSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  DebianWithSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: debian-with-soci-cluster
+  ExecuteDeleteClusterFunctionDebianWithSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionDebianWithSoci
+    Properties:
+      Cluster      : !Ref DebianWithSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  UbuntuWithoutSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: ubuntu-without-soci-cluster
+  ExecuteDeleteClusterFunctionUbuntuWithoutSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionUbuntuWithoutSoci
+    Properties:
+      Cluster      : !Ref UbuntuWithoutSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  UbuntuWithSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: ubuntu-with-soci-cluster
+  ExecuteDeleteClusterFunctionUbuntuWithSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionUbuntuWithSoci
+    Properties:
+      Cluster      : !Ref UbuntuWithSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  AlmaLinuxWithoutSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: almalinux-without-soci-cluster
+  ExecuteDeleteClusterFunctionAlmaLinuxWithoutSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlmaLinuxWithoutSoci
+    Properties:
+      Cluster      : !Ref AlmaLinuxWithoutSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  AlmaLinuxWithSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: almalinux-with-soci-cluster
+  ExecuteDeleteClusterFunctionAlmaLinuxWithSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlmaLinuxWithSoci
+    Properties:
+      Cluster      : !Ref AlmaLinuxWithSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  AlpineWithWPWithoutSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: alpine-with-wp-without-soci-cluster
+  ExecuteDeleteClusterFunctionAlpineWithWPWithoutSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlpineWithWPWithoutSoci
+    Properties:
+      Cluster      : !Ref AlpineWithWPWithoutSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  AlpineWithWPAndSociECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      CapacityProviders: 
+        - FARGATE
+      ClusterName: alpine-with-wp-and-soci-cluster
+  ExecuteDeleteClusterFunctionAlpineWithWPAndSoci:
+    Type: Custom::ExecuteDeleteClusterFunctionAlpineWithWPAndSoci
+    Properties:
+      Cluster      : !Ref AlpineWithWPAndSociECSCluster
+      ServiceToken : !GetAtt DeleteClusterFunction.Arn
+
+  # ==============================================================================================================================================================
+  # ECS Tasks
+  # ==============================================================================================================================================================
+
+  GenericExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              -  ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  GenericExecutionRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "GenericExecutionRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - "s3:GetObject"
+              - "ecr:DescribeImages"
+              - "ecr:DescribeRegistry"
+              - "ecr:GetAuthorizationToken"
+              - "ecr:BatchCheckLayerAvailability"
+              - "ecr:BatchGetImage"
+              - "ecr:GetDownloadUrlForLayer"
+              - "ecr:GetRepositoryPolicy"
+              - "ecr:ListImages"
+              - "logs:CreateLogStream"
+              - "logs:PutLogEvents"
+            Resource: "*"
+      Roles: 
+        - !Ref GenericExecutionRole
+
+  GenericTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              -  ecs-tasks.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  GenericTaskRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "GenericTaskRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+            Resource: "*"
+      Roles: 
+        - !Ref GenericTaskRole
+
+  AlpineWithoutSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlpineWithoutSOCI
+           Image: !Sub "${AlpineWithoutSociECRRepo.RepositoryUri}:latest"
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlpineWithoutSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: alpine-without-soci
+      NetworkMode: awsvpc
+
+  AlpineWithSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlpineWithSOCI
+           Image: !Sub "${AlpineWithSociECRRepo.RepositoryUri}:latest"
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlpineWithSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: alpine-with-soci
+      NetworkMode: awsvpc
+
+  DebianWithoutSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: DebianWithoutSOCI
+           Image: !Sub "${DebianWithoutSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref DebianWithoutSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: debian-without-soci
+      NetworkMode: awsvpc
+
+  DebianWithSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: DebianWithSOCI
+           Image: !Sub "${DebianWithSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref DebianWithSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: debian-with-soci
+      NetworkMode: awsvpc
+
+  UbuntuWithoutSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: UbuntuWithoutSOCI
+           Image: !Sub "${UbuntuWithoutSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref UbuntuWithoutSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: ubuntu-without-soci
+      NetworkMode: awsvpc
+
+  UbuntuWithSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: UbuntuWithSOCI
+           Image: !Sub "${UbuntuWithSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref UbuntuWithSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: ubuntu-with-soci
+      NetworkMode: awsvpc
+
+  AlmaLinuxWithoutSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlmaLinuxWithoutSOCI
+           Image: !Sub "${AlmaLinuxWithoutSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlmaLinuxWithoutSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: almalinux-without-soci
+      NetworkMode: awsvpc
+
+  AlmaLinuxWithSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlmaLinuxWithSOCI
+           Image: !Sub "${AlmaLinuxWithSociECRRepo.RepositoryUri}:latest"
+           Environment:
+             - Name: APACHE_RUN_DIR
+               Value: /var/www/html
+             - Name: APACHE_LOG_DIR
+               Value: /var/log/apache2
+             - Name: APACHE_RUN_USER
+               Value: apache
+             - Name: APACHE_RUN_GROUP
+               Value: apache
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlmaLinuxWithSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: almalinux-with-soci
+      NetworkMode: awsvpc
+
+  AlpineWithWPWithoutSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlpineWithoutSOCI
+           Image: !Sub "${AlpineWithWPWithoutSociECRRepo.RepositoryUri}:latest"
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlpineWithWPWithoutSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: alpine-with-wp-without-soci
+      NetworkMode: awsvpc
+
+  AlpineWithWPAndSOCITaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      ContainerDefinitions:
+         - Cpu: 256
+           Memory: 512
+           Essential: true
+           Name: AlpineWithSOCI
+           Image: !Sub "${AlpineWithWPAndSociECRRepo.RepositoryUri}:latest"
+           LogConfiguration:
+             LogDriver: awslogs
+             Options:
+               awslogs-group: !Ref AlpineWithWPAndSociLogGroup
+               awslogs-region: !Sub ${AWS::Region}
+               awslogs-stream-prefix: ecs
+           PortMappings:
+             - ContainerPort: 80
+      Cpu: 512
+      Memory: 1024
+      ExecutionRoleArn: !GetAtt GenericExecutionRole.Arn
+      RequiresCompatibilities: 
+        - FARGATE
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: ARM64
+      TaskRoleArn: !Ref GenericTaskRole
+      Family: alpine-with-wp-and-soci
+      NetworkMode: awsvpc
+
+  # ==============================================================================================================================================================
+  # LazyLoadingTestVM
+  # ==============================================================================================================================================================
+  
+  LazyLoadingTestVMIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  LazyLoadingTestVMIAMRolePolicies:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "LazyLoadingTestVMIAMRolePolicies"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "ECR"
+            Effect: "Allow"
+            Action: "ecr:*"
+            Resource: "*"
+          - Sid: "ECSOurTasks"
+            Effect: "Allow"
+            Action: 
+              - "ecs:RunTask"
+            Resource:
+              - !Ref AlpineWithoutSOCITaskDef
+              - !Ref AlpineWithSOCITaskDef
+              - !Ref DebianWithoutSOCITaskDef
+              - !Ref DebianWithSOCITaskDef
+              - !Ref UbuntuWithoutSOCITaskDef
+              - !Ref UbuntuWithSOCITaskDef
+              - !Ref AlmaLinuxWithoutSOCITaskDef
+              - !Ref AlmaLinuxWithSOCITaskDef
+              - !Ref AlpineWithWPWithoutSOCITaskDef
+              - !Ref AlpineWithWPAndSOCITaskDef
+          - Sid: "ECSAll"
+            Effect: "Allow"
+            Action: 
+              - "ecs:ListTasks"
+              - "ecs:DescribeTasks"
+              - "ecs:StopTask"
+            Resource: "*"
+          - Sid: "IAM"
+            Effect: "Allow"
+            Action: 
+              - "iam:PassRole"
+            Resource: "*"
+          - Sid: "AllowSSMconnection"
+            Effect: "Allow"
+            Action: 
+              - "ec2messages:GetMessages"
+              - "ssm:GetDocument"
+              - "ssm:ListAssociations"
+              - "ssm:ListInstanceAssociations"
+              - "ssm:UpdateInstanceAssociationStatus"
+              - "ssm:UpdateInstanceInformation"
+              - "ssmmessages:CreateControlChannel"
+              - "ssmmessages:OpenControlChannel"
+              - "ssmmessages:CreateDataChannel"
+              - "ssmmessages:OpenDataChannel"
+            Resource: "*"
+      Roles:
+        - !Ref "LazyLoadingTestVMIAMRole"
+  LazyLoadingTestVMIAMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+        - !Ref LazyLoadingTestVMIAMRole
+
+  LazyLoadingTestVM:
+    DependsOn:
+    - AlpineWithSOCITaskDef
+    - AlpineWithoutSOCITaskDef
+    - DebianWithSOCITaskDef
+    - DebianWithoutSOCITaskDef
+    - UbuntuWithSOCITaskDef
+    - UbuntuWithoutSOCITaskDef
+    - AlmaLinuxWithSOCITaskDef
+    - AlmaLinuxWithoutSOCITaskDef
+    - AlpineWithWPWithoutSOCITaskDef
+    - AlpineWithWPAndSOCITaskDef
+    Type: AWS::EC2::Instance
+    Metadata:
+      'AWS::CloudFormation::Init':
+        config:
+          packages:
+            yum:
+              jq: []           
+          files:
+            '/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json':
+              content: |
+                {
+                        "agent": {
+                          "metrics_collection_interval": 60,
+                          "run_as_user": "cwagent"
+                        },
+                        "logs": {
+                          "logs_collected": {
+                              "files": {
+                                      "collect_list": [
+                                              {
+                                                  "file_path": "/var/log/cloud-init-output.log",
+                                                  "log_group_name": "{CloudwatchLazyLoadingTestVMLogGroupCloudInitOutputLog}"
+                                              },
+                                              {
+                                                  "file_path": "/var/log/cfn-init-cmd.log",
+                                                  "log_group_name": "{CloudwatchLazyLoadingTestVMLogGroupCfnInitCmdLog}"
+                                              }
+                                        ]
+                                }
+                          }
+                        }                  
+                }
+            '/etc/systemd/system/buildkit.service':
+              content: |
+                [Unit]
+                Description=Buildkit, used for nerdctl
+
+                [Service]
+                ExecStart=/opt/buildkit/bin/buildkitd --oci-worker=false --containerd-worker=true
+
+                [Install]
+                WantedBy=multi-user.target
+
+            '/etc/buildkit/buildkitd.toml':
+              content: |
+                [worker.oci]
+                  enabled = false
+
+                [worker.containerd]
+                  enabled = true
+                  # namespace should be "k8s.io" for Kubernetes (including Rancher Desktop)
+                  namespace = "default"
+
+            '/opt/lazyloading/Dockerfile_alpine': 
+              content: |
+                FROM alpine:latest
+
+                RUN apk add apache2
+                ADD downloads.tar.gz /var/www/localhost/htdocs/downloads
+
+                CMD ["/usr/sbin/httpd", "-DFOREGROUND"]
+
+            '/opt/lazyloading/Dockerfile_alpine_with_wordpress': 
+              content: |
+                FROM alpine:latest
+
+                ARG host_ip_address
+                RUN apk update > /dev/null 2>&1 &&\
+                    apk add apache2 tar curl
+                RUN echo "not lazy" > /var/www/localhost/htdocs/lazy.html
+                RUN mkdir /opt/wordpress && \
+                    PHPVERSION=$(apk search php|sort| grep -e ^php| awk -F"-" '{print $1}' | grep [01234567890] | tail -n 1) &&\
+                    apk add ${PHPVERSION} ${PHPVERSION}-common ${PHPVERSION}-session ${PHPVERSION}-iconv ${PHPVERSION}-json ${PHPVERSION}-gd ${PHPVERSIOBN}-curl ${PHPVERSION}-xml ${PHPVERSION}-mysqli ${PHPVERSION}-imap &&\
+                    apk add ${PHPVERSION}-cgi fcgi ${PHPVERSION}-pdo ${PHPVERSION}-pdo_mysql ${PHPVERSION}-soap ${PHPVERSION}-posix ${PHPVERSION}-gettext ${PHPVERSION}-ldap &&\
+                    apk add ${PHPVERSION}-ctype ${PHPVERSION}-dom ${PHPVERSION}-simplexml ${PHPVERSION}-apache2 ${PHPVERSION}-phar &&\
+                    cd /opt/wordpress &&\
+                    ln -s /usr/bin/${PHPVERSION} /usr/bin/php &&\
+                    curl -O https://wordpress.org/latest.tar.gz &&\
+                    tar -xzvf latest.tar.gz &&\ 
+                    cp -r wordpress/* /var/www/localhost/htdocs &&\
+                    rm -f /var/www/localhost/htdocs/index.html &&\
+                    curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar &&\
+                    mv wp-cli.phar /var/www/localhost/htdocs/wp &&\
+                    chmod a+x /var/www/localhost/htdocs/wp &&\
+                    echo "lazy" > /var/www/localhost/htdocs/lazy.html
+                RUN cp /var/www/localhost/htdocs/wp-config-sample.php /var/www/localhost/htdocs/wp-config.php &&\
+                    sed 's/database_name_here/wordpress/g' -i /var/www/localhost/htdocs/wp-config.php &&\
+                    sed 's/username_here/root/g' -i /var/www/localhost/htdocs/wp-config.php &&\
+                    sed 's/password_here/TestPassword/g' -i /var/www/localhost/htdocs/wp-config.php &&\
+                    sed "s/localhost/$host_ip_address/g" -i /var/www/localhost/htdocs/wp-config.php
+                ADD --chown=apache:apache ./uploads.tar.gz /var/www/localhost/htdocs/wp-content
+                CMD ["/usr/sbin/httpd", "-DFOREGROUND"]
+
+            '/opt/lazyloading/Dockerfile_debian': 
+              content: |
+                FROM debian:bookworm
+
+                RUN apt update &&\
+                    apt upgrade -y &&\
+                    apt install apache2 -y &&\
+                    adduser --system --group apache &&\
+                    mkdir -p /var/log/apache2
+                ADD downloads.tar.gz /var/www/html/downloads
+
+                CMD ["/usr/sbin/apache2", "-DFOREGROUND"]
+
+            '/opt/lazyloading/Dockerfile_ubuntu': 
+              content: |
+                FROM ubuntu:latest
+
+                RUN apt update &&\
+                    apt upgrade -y &&\
+                    apt install apache2 -y &&\
+                    adduser --system --group apache &&\
+                    mkdir -p /var/log/apache2
+                ADD downloads.tar.gz /var/www/html/downloads
+
+                CMD ["/usr/sbin/apache2", "-DFOREGROUND"]
+
+            '/opt/lazyloading/Dockerfile_almalinux': 
+              content: |
+                FROM almalinux:latest
+
+                RUN yum update -y && \
+                    yum install httpd -y
+                ADD downloads.tar.gz /var/www/html/downloads
+
+                CMD ["/usr/sbin/httpd", "-DFOREGROUND"]
+
+            '/opt/lazyloading/01-install-software.sh':
+              content: |
+                #!/bin/bash
+                #
+                # Install the SSM agent (see also: https://docs.aws.amazon.com/systems-manager/latest/userguide/agent-install-al2.html)
+                # Install the cloudwatch agent (see also: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/download-cloudwatch-agent-commandline.html)
+                # Install the AWS CLI (see also: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+                # Install nerdctl
+
+                function install_ssm_agent() {
+                    yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_arm64/amazon-ssm-agent.rpm    
+                }
+
+                function install_cloudwatch_agent() {
+                    yum install amazon-cloudwatch-agent -y
+                    systemctl enable --now amazon-cloudwatch-agent
+                }
+
+                function change_ownership_root_cwagent() {
+                    chown root:cwagent /var/log/messages
+                    chmod 640 /var/log/messages
+
+                    chown root:cwagent /var/log/cloud-init-output.log
+                    chmod 640 /var/log/cloud-init-output.log
+                }
+
+                function install_aws_cli() {
+                    yum install -y unzip
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o "awscliv2.zip"
+                    unzip awscliv2.zip
+                    sudo ./aws/install
+                }
+
+                function move_from_aws_cli_v1_to_aws_cli_v2() {
+                    ls -l /bin/aws
+                    rm -f /bin/aws
+                    ln -s /usr/local/bin/aws /bin/aws
+                }
+
+                function install_time() {
+                   yum install -y time
+                }
+
+                function install_nerdctl() {
+                    yum install -y nerdctl cni-plugins containerd iptables
+                    systemctl enable --now containerd
+                }
+
+                function install_buildkit() {
+                    mkdir -p /opt/buildkit
+                    cd /opt/buildkit
+                    curl -L https://github.com/moby/buildkit/releases/download/v0.11.6/buildkit-v0.11.6.linux-arm-v7.tar.gz -o buildkit.tar.gz
+                    tar -xzvf ./buildkit.tar.gz
+                    cp ./bin/* /usr/bin
+                    systemctl enable --now buildkit
+                    cd -
+                }
+
+                function install_soci() {
+                    mkdir -p /opt/soci
+                    cd /opt/soci
+                    curl -L https://github.com/awslabs/soci-snapshotter/releases/download/v0.3.0/soci-snapshotter-0.3.0-linux-arm64.tar.gz -o soci.tar.gz
+                    tar -xzvf ./soci.tar.gz
+                    cd -
+                }
+
+                function configure_and_run_mysql() {
+                   nerdctl run -d -p3306:3306 -eMYSQL_ROOT_PASSWORD=TestPassword mysql
+                   yum install mariadb105 -y
+
+                   echo "Sleep one minute to initialize local database"
+                   sleep 60
+
+                   curl https://frpublic2.s3.eu-west-1.amazonaws.com/Xforce/Code/mysql_dump.sql -o /opt/lazyloading/mysql_dump.sql
+                   curl https://frpublic2.s3.eu-west-1.amazonaws.com/Xforce/Code/uploads.tar.gz -o /opt/lazyloading/uploads.tar.gz
+
+                   LOCAL_IP=$(ip address show | grep 10.0  | grep inet | awk '{print $2}' | awk -F'/' '{print $1}')
+                   mysql -uroot -pTestPassword -h$LOCAL_IP <<here
+                CREATE DATABASE wordpress;
+                here
+                   mysql -uroot -pTestPassword -h$LOCAL_IP -Dwordpress < /opt/lazyloading/mysql_dump.sql
+                }
+
+                #
+                # Main
+                #
+
+                install_ssm_agent
+
+                install_cloudwatch_agent
+                change_ownership_root_cwagent
+
+                install_aws_cli
+                move_from_aws_cli_v1_to_aws_cli_v2
+
+                install_time
+                install_nerdctl
+                install_buildkit
+                install_soci
+                configure_and_run_mysql
+              mode: 00500
+            '/opt/lazyloading/02-create-big-files.sh':
+              content: |
+                #!/bin/bash
+
+                mkdir -p /opt/lazyloading/downloads
+                echo "Create 100M file"
+                dd if=/dev/urandom of=/opt/lazyloading/downloads/bigfile_100M.bin bs=100M count=1
+                echo "Create 200M file"
+                dd if=/dev/urandom of=/opt/lazyloading/downloads/bigfile_200M.bin bs=100M count=2
+                
+                echo "Tar files"
+                cd /opt/lazyloading/downloads
+                tar -cvzf ../downloads.tar.gz *
+
+              mode: 00500
+            '/opt/lazyloading/03-nerdctl-build-and-push.sh':
+              content: !Sub |
+                #!/bin/bash
+
+                function build_image() {
+                    CONTAINER_NAME=$1
+                    DOCKERFILE=$2
+
+                    nerdctl build --platform arm64 -f $DOCKERFILE -t $CONTAINER_NAME .
+                }
+
+                function build_image_with_wordpress() {
+                    CONTAINER_NAME=$1
+                    DOCKERFILE=$2
+                    LOCAL_IP=$(ip address show | grep 10.0  | grep inet | awk '{print $2}' | awk -F'/' '{print $1}')
+
+                    nerdctl build --platform arm64 -f $DOCKERFILE -t $CONTAINER_NAME --build-arg host_ip_address=$LOCAL_IP .
+                }
+
+                function push() {
+                    IMAGE_NAME_SRC=$1
+                    REPO=$2
+
+                    aws ecr get-login-password --region eu-west-1 | nerdctl login --username AWS --password-stdin $REPO
+                    nerdctl tag $IMAGE_NAME_SRC $REPO
+                    nerdctl push $REPO
+                }
+
+                cd /opt/lazyloading
+
+                build_image alpine-base Dockerfile_alpine
+
+                push alpine-base ${AlpineWithoutSociECRRepo.RepositoryUri}
+                push alpine-base ${AlpineWithSociECRRepo.RepositoryUri}
+
+                build_image debian-base Dockerfile_debian
+
+                push debian-base ${DebianWithoutSociECRRepo.RepositoryUri}
+                push debian-base ${DebianWithSociECRRepo.RepositoryUri}
+
+                build_image ubuntu-base Dockerfile_ubuntu
+
+                push ubuntu-base ${UbuntuWithoutSociECRRepo.RepositoryUri}
+                push ubuntu-base ${UbuntuWithSociECRRepo.RepositoryUri}
+
+                build_image almalinux-base Dockerfile_almalinux
+
+                push almalinux-base ${AlmaLinuxWithoutSociECRRepo.RepositoryUri}
+                push almalinux-base ${AlmaLinuxWithSociECRRepo.RepositoryUri}
+
+                build_image_with_wordpress alpine-base-wordpress Dockerfile_alpine_with_wordpress
+
+                push alpine-base-wordpress ${AlpineWithWPWithoutSociECRRepo.RepositoryUri}
+                push alpine-base-wordpress ${AlpineWithWPAndSociECRRepo.RepositoryUri}
+
+              mode: 00500
+            '/opt/lazyloading/04-soci.sh':
+              content: !Sub |
+                #!/bin/bash
+
+                function soci() {
+                  REPO=$1
+                  PASSWORD=$2
+
+                  ./soci create $REPO
+                  ./soci push --user AWS:$PASSWORD $REPO
+                }
+
+                cd /opt/soci
+                PASSWORD=$(aws ecr get-login-password --region ${AWS::Region})
+ 
+                echo "Alpine"
+                soci ${AlpineWithSociECRRepo.RepositoryUri}:latest $PASSWORD
+
+                echo "Debian"
+                soci ${DebianWithSociECRRepo.RepositoryUri}:latest $PASSWORD
+
+                echo "Ubuntu"
+                soci ${UbuntuWithSociECRRepo.RepositoryUri}:latest $PASSWORD
+
+                echo "AlmaLinux"
+                soci ${AlmaLinuxWithSociECRRepo.RepositoryUri}:latest $PASSWORD
+
+                echo "Alpine with wordpress"
+                soci ${AlpineWithWPAndSociECRRepo.RepositoryUri}:latest $PASSWORD
+              mode: 00500
+            '/opt/lazyloading/05-start-clusters.sh':
+              content: !Sub |
+                function start_tasks() {
+                    TASK_ARN=$1
+                    CLUSTER_NAME=$2
+
+                    aws ecs run-task --count 5 \
+                                     --launch-type FARGATE \
+                                     --task-definition $TASK_ARN \
+                                     --network-configuration='{"awsvpcConfiguration":{"subnets":["${PublicSubnetAZa}","${PublicSubnetAZb}"],"securityGroups":["${SecurityGroupLazyLoadingContainer}"],"assignPublicIp":"ENABLED"}}' \
+                                     --cluster $CLUSTER_NAME \
+                                     --region ${AWS::Region} 
+                }
+
+                start_tasks "${AlpineWithoutSOCITaskDef}" "alpine-without-soci-cluster"
+                start_tasks "${AlpineWithSOCITaskDef}" "alpine-with-soci-cluster"
+
+                start_tasks "${DebianWithoutSOCITaskDef}" "debian-without-soci-cluster"
+                start_tasks "${DebianWithSOCITaskDef}" "debian-with-soci-cluster"
+
+                start_tasks "${UbuntuWithoutSOCITaskDef}" "ubuntu-without-soci-cluster"
+                start_tasks "${UbuntuWithSOCITaskDef}" "ubuntu-with-soci-cluster"
+
+                start_tasks "${AlmaLinuxWithoutSOCITaskDef}" "almalinux-without-soci-cluster"
+                start_tasks "${AlmaLinuxWithSOCITaskDef}" "almalinux-with-soci-cluster"
+
+                start_tasks "${AlpineWithWPWithoutSOCITaskDef}" "alpine-with-wp-without-soci-cluster"
+                start_tasks "${AlpineWithWPAndSOCITaskDef}" "alpine-with-wp-and-soci-cluster"
+              mode: 00500
+            '/opt/lazyloading/06-sleep-two-minutes.sh':
+              content: |
+                 #!/bin/bash
+                 
+                 echo "TRACE Sleep 2 minutes..."
+                 sleep 120
+              mode: 00500
+            '/opt/lazyloading/07-check-starttimes.sh':
+              content: !Sub |
+                #!/bin/bash
+
+                function list_start_end_times() {
+                    CLUSTER=$1
+                    TASKDEF=$2
+                    REGION="${AWS::Region}"
+                    TASKS=$(aws ecs list-tasks \
+                        --cluster $CLUSTER \
+                        --family $TASKDEF \
+                        --region $REGION \
+                        --query 'taskArns[*]' \
+                        --output text)
+
+                    aws ecs describe-tasks \
+                        --tasks $TASKS \
+                        --region $REGION \
+                        --cluster $CLUSTER \
+                        --query "tasks[] | reverse(sort_by(@, &createdAt)) | [].[{startedAt: startedAt, createdAt: createdAt, taskArn: taskArn}]" \
+                        --output table
+                }
+
+                list_start_end_times ${AlpineWithoutSociECSCluster} alpine-without-soci
+                list_start_end_times ${AlpineWithSociECSCluster} alpine-with-soci
+
+                list_start_end_times ${DebianWithoutSociECSCluster} debian-without-soci
+                list_start_end_times ${DebianWithSociECSCluster} debian-with-soci
+
+                list_start_end_times ${UbuntuWithoutSociECSCluster} ubuntu-without-soci
+                list_start_end_times ${UbuntuWithSociECSCluster} ubuntu-with-soci
+
+                list_start_end_times ${AlmaLinuxWithoutSociECSCluster} almalinux-without-soci
+                list_start_end_times ${AlmaLinuxWithSociECSCluster} almalinux-with-soci
+
+                list_start_end_times ${AlpineWithWPWithoutSociECSCluster} alpine-with-wp-without-soci
+                list_start_end_times ${AlpineWithWPAndSociECSCluster} alpine-with-wp-and-soci
+              mode: 00500
+            '/opt/lazyloading/08-check-downloadtimes.sh':
+              content: |
+                #!/bin/bash
+
+                FILENAME=bigfile_200M.bin
+                FILESIZE=$(ls -l /opt/lazyloading/downloads/$FILENAME | awk '{print $5}')
+
+                function list_start_end_times() {
+                    CLUSTER=$1
+                    TASKDEF=$2
+                    REGION="eu-west-1"
+                    TASKS=$(aws ecs list-tasks \
+                        --cluster $CLUSTER \
+                        --family $TASKDEF \
+                        --region $REGION \
+                        --query 'taskArns[*]' \
+                        --output text)
+
+                    IPADDR=$(aws ecs describe-tasks \
+                        --tasks $TASKS \
+                        --region $REGION \
+                        --cluster $CLUSTER \
+                        --query "tasks[] | reverse(sort_by(@, &createdAt)) | [].containers[0].networkInterfaces[0].privateIpv4Address" \
+                        --output text)
+
+                    echo "TaskDef: $TASKDEF"
+                    for IP in $IPADDR
+                    do
+                        rm -f ./$FILENAME
+                        RUN_TIME=$(/usr/bin/time -f %e curl -O -s http://$IP/downloads/$FILENAME 2>&1)
+
+                        RUN_SIZE=$(ls -l $FILENAME | awk '{print $5}')
+                        if [[ "$RUN_SIZE" != "$FILESIZE" ]]
+                        then
+                            echo "File sizes don't match (was: $RUN_SIZE, should be $FILESIZE)"
+                        fi
+                        echo "Time: $RUN_TIME"
+                    done
+                }
+
+                echo "FIRST RUN"
+                list_start_end_times alpine-without-soci-cluster alpine-without-soci
+                echo "SECOND RUN"
+                list_start_end_times alpine-without-soci-cluster alpine-without-soci
+                echo "FIRST RUN"
+                list_start_end_times alpine-with-soci-cluster alpine-with-soci
+                echo "SECOND RUN"
+                list_start_end_times alpine-with-soci-cluster alpine-with-soci
+
+                echo "FIRST RUN"
+                list_start_end_times debian-without-soci-cluster debian-without-soci
+                echo "SECOND RUN"
+                list_start_end_times debian-without-soci-cluster debian-without-soci
+                echo "FIRST RUN"
+                list_start_end_times debian-with-soci-cluster debian-with-soci
+                echo "SECOND RUN"
+                list_start_end_times debian-with-soci-cluster debian-with-soci
+
+                echo "FIRST RUN"
+                list_start_end_times ubuntu-without-soci-cluster ubuntu-without-soci
+                echo "SECOND RUN"
+                list_start_end_times ubuntu-without-soci-cluster ubuntu-without-soci
+                echo "FIRST RUN"
+                list_start_end_times ubuntu-with-soci-cluster ubuntu-with-soci
+                echo "SECOND RUN"
+                list_start_end_times ubuntu-with-soci-cluster ubuntu-with-soci
+
+                echo "FIRST RUN"
+                list_start_end_times almalinux-without-soci-cluster almalinux-without-soci
+                echo "SECOND RUN"
+                list_start_end_times almalinux-without-soci-cluster almalinux-without-soci
+                echo "FIRST RUN"
+                list_start_end_times almalinux-with-soci-cluster almalinux-with-soci
+                echo "SECOND RUN"
+                list_start_end_times almalinux-with-soci-cluster almalinux-with-soci
+              mode: 00500
+            '/opt/lazyloading/change_site_ip_address.sh':
+              content: |
+                # Change IP address in the database to the current IP address
+                SITE_IP_ADDRESS=$1
+                nerdctl run alpine-base-wordpress /bin/sh -c "cd /var/www/localhost/htdocs;./wp option set home http://${SITE_IP_ADDRESS} --allow-root"
+                nerdctl run alpine-base-wordpress /bin/sh -c "cd /var/www/localhost/htdocs;./wp option set siteurl http://${SITE_IP_ADDRESS} --allow-root"
+              mode: 00500
+            '/opt/lazyloading/09-check-downloadtimes-wordpress.sh':
+              content: |
+                #!/bin/bash
+
+                PAGE1="index.php/2023/08/01/test-with-a-second-image/"
+                IMG1="wp-content/uploads/2023/08/kanhaiya-sharma-_HdRQWJ-Pt8-unsplash-1536x864.jpg"
+                IMG2="wp-content/uploads/2023/08/rafael-garcin-BemwT7_KYAM-unsplash-1536x1152.jpg"
+                PAGE2="index.php/2023/07/30/test-with-image/"
+                IMG3="wp-content/uploads/2023/07/keys-1196217.jpg"
+                FILESIZE=$(ls -l /opt/lazyloading/downloads/$FILENAME | awk '{print $5}')
+
+                function list_start_end_times() {
+                    CLUSTER=$1
+                    TASKDEF=$2
+                    REGION="eu-west-1"
+                    TASKS=$(aws ecs list-tasks \
+                      --cluster $CLUSTER \
+                      --family $TASKDEF \
+                      --region $REGION \
+                      --query 'taskArns[*]' \
+                      --output text)
+
+                  IPADDR=$(aws ecs describe-tasks \
+                      --tasks $TASKS \
+                      --region $REGION \
+                      --cluster $CLUSTER \
+                      --query "tasks[] | reverse(sort_by(@, &createdAt)) | [].containers[0].networkInterfaces[0].privateIpv4Address" \
+                      --output text)
+
+                  echo "TaskDef: $TASKDEF"
+                  for IP in $IPADDR
+                  do
+                      nerdctl run alpine-base-wordpress /bin/sh -c "cd /var/www/localhost/htdocs;./wp option set home http://${IP} --allow-root"
+                      nerdctl run alpine-base-wordpress /bin/sh -c "cd /var/www/localhost/htdocs;./wp option set siteurl http://${IP} --allow-root"
+
+                      RUN_TIME_PAGE1=$(/usr/bin/time -f %e curl -o /dev/null -s http://$IP/$PAGE1 2>&1)
+                      RUN_TIME_IMG1=$(/usr/bin/time -f %e curl -o /dev/null -s http://$IP/$IMG1 2>&1)
+                      RUN_TIME_IMG2=$(/usr/bin/time -f %e curl -o /dev/null -s http://$IP/$IMG2 2>&1)
+                      RUN_TIME_PAGE2=$(/usr/bin/time -f %e curl -o /dev/null -s http://$IP/$PAGE2 2>&1)
+                      RUN_TIME_IMG3=$(/usr/bin/time -f %e curl -o /dev/null -s http://$IP/$IMG3 2>&1)
+
+                      echo "Time: $RUN_TIME_PAGE1 + $RUN_TIME_IMG1 + $RUN_TIME_IMG2 + $RUN_TIME_PAGE2 + $RUN_TIME_IMG3"
+                  done
+                }
+
+                echo "FIRST RUN"
+                list_start_end_times alpine-with-wp-without-soci-cluster alpine-with-wp-without-soci
+                echo "SECOND RUN"
+                list_start_end_times alpine-with-wp-without-soci-cluster alpine-with-wp-without-soci
+                echo "FIRST RUN"
+                list_start_end_times alpine-with-wp-and-soci-cluster alpine-with-wp-and-soci
+                echo "SECOND RUN"
+                list_start_end_times alpine-with-wp-and-soci-cluster alpine-with-wp-and-soci
+              mode: 00500
+            '/opt/lazyloading/10-check-lazy-page.sh':
+              content: |
+                #!/bin/bash
+
+                PAGE="lazy.html"
+
+                function list_start_end_times() {
+                    CLUSTER=$1
+                    TASKDEF=$2
+                    REGION="eu-west-1"
+                    TASKS=$(aws ecs list-tasks \
+                      --cluster $CLUSTER \
+                      --family $TASKDEF \
+                      --region $REGION \
+                      --query 'taskArns[*]' \
+                      --output text)
+
+                  IPADDR=$(aws ecs describe-tasks \
+                      --tasks $TASKS \
+                      --region $REGION \
+                      --cluster $CLUSTER \
+                      --query "tasks[] | reverse(sort_by(@, &createdAt)) | [].containers[0].networkInterfaces[0].privateIpv4Address" \
+                      --output text)
+
+                  echo "TaskDef: $TASKDEF"
+                  for IP in $IPADDR
+                  do
+                      LAZY_TEXT=$(curl http://${IP}/${PAGE})
+                      if [[ "$LAZY_TEXT" -ne "lazy" ]]
+                      then
+                          echo "/lazy.html: ${LAZY_TEXT} instead of lazy"
+                      fi
+                  done
+                }
+
+                list_start_end_times alpine-with-wp-without-soci-cluster alpine-with-wp-without-soci
+                list_start_end_times alpine-with-wp-and-soci-cluster alpine-with-wp-and-soci
+              mode: 00500
+            '/opt/lazyloading/11-stop-tasks.sh':
+              content: |
+                #!/bin/bash
+
+                function stop_tasks() {
+                    CLUSTER=$1
+                    TASKDEF=$2
+                    REGION="eu-west-1"
+                    TASKS=$(aws ecs list-tasks \
+                        --cluster $CLUSTER \
+                        --family $TASKDEF \
+                        --region $REGION \
+                        --query 'taskArns[*]' \
+                        --output text)
+
+                    for TASK in $TASKS
+                    do
+                        aws ecs stop-task \
+                          --cluster $CLUSTER \
+                          --task $TASK
+                    done
+                }
+
+                stop_tasks alpine-without-soci-cluster alpine-without-soci
+                stop_tasks alpine-with-soci-cluster alpine-with-soci
+
+                stop_tasks debian-without-soci-cluster debian-without-soci
+                stop_tasks debian-with-soci-cluster debian-with-soci
+
+                stop_tasks ubuntu-without-soci-cluster ubuntu-without-soci
+                stop_tasks ubuntu-with-soci-cluster ubuntu-with-soci
+
+                stop_tasks almalinux-without-soci-cluster almalinux-without-soci
+                stop_tasks almalinux-with-soci-cluster almalinux-with-soci
+
+                stop_tasks alpine-with-wp-without-soci-cluster alpine-with-wp-without-soci
+                stop_tasks alpine-with-wp-and-soci-cluster alpine-with-wp-and-soci
+              mode: 00500
+
+          commands:
+            01-install-software:
+              command: /opt/lazyloading/01-install-software.sh
+              ignoreErrors: false
+            02-create-big-files:
+              command: /opt/lazyloading/02-create-big-files.sh
+              ignoreErrors: false
+            03-nerdctl-build-and-push:
+              command: /opt/lazyloading/03-nerdctl-build-and-push.sh
+              ignoreErrors: false
+            04-soci:
+              command: /opt/lazyloading/04-soci.sh
+              ignoreErrors: false
+            05-start-clusters:
+              command: /opt/lazyloading/05-start-clusters.sh
+              ignoreErrors: false
+            06-sleep-two-minutes:
+              command: /opt/lazyloading/06-sleep-two-minutes.sh
+              ignoreErrors: false
+            07-check-starttimes:
+              command: /opt/lazyloading/07-check-starttimes.sh
+              ignoreErrors: false
+            08-check-downloadtimes:
+              command: /opt/lazyloading/08-check-downloadtimes.sh
+              ignoreErrors: false
+            09-check-downloadtimes-wordpress:
+              command: /opt/lazyloading/09-check-downloadtimes-wordpress.sh
+              ignoreErrors: false
+            10-check-lazy-page:
+              command: /opt/lazyloading/10-check-lazy-page.sh
+              ignoreErrors: false
+            11-stop-tasks:
+              command: /opt/lazyloading/11-stop-tasks.sh
+              ignoreErrors: false
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT1H
+    Properties:
+      ImageId: !Ref AmazonLinux2023AMI 
+      InstanceType: !Ref EC2InstanceType
+      IamInstanceProfile: !Ref LazyLoadingTestVMIAMInstanceProfile
+      SubnetId: !Ref PublicSubnetAZa
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: 32
+            Encrypted: True
+      Tags:
+        - Key: Name
+          Value: LazyLoadingTestVMInstance 
+      SecurityGroupIds:
+        - !Ref SecurityGroupLazyLoadingEC2
+      UserData: 
+        "Fn::Base64": 
+          !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y aws-cfn-bootstrap
+            yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_arm64/amazon-ssm-agent.rpm    
+
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LazyLoadingTestVM --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource LazyLoadingTestVM --region ${AWS::Region}
+            # /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource LazyLoadingTestVM --region ${AWS::Region}
+    
